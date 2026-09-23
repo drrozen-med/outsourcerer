@@ -31,7 +31,7 @@ by writing one descriptor, not by editing twelve tables.
 lane_descriptor {
   # ---- identity ----
   name            : the canonical lane code (dv | or | cc | cx | gm | local |
-                   droid | cursor | hermes | warp | cline | claudex | tokenrouter)
+                   droid | cursor | hermes | warp | cline | opencode | claudex | tokenrouter)
   aliases         : every other string this lane is known by, so the three
                    naming layers collapse: provider names, disp vehicles, and
                    legacy codes. e.g. cc -> { "cc", "ccnative", "claude-native" },

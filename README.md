@@ -313,9 +313,15 @@ The model alias picks the lane automatically; `--provider` is only for the OpenR
 
 **Lanes:** `hy3`/`glm-5.2`/`deepseek-*` (OpenRouter, via `cc` or `codex`) ·
 `sol`/`terra`/`luna` (Codex native) · `fable`/`opus`/`sonnet`/`haiku` (Claude native) ·
-`gemini-pro`/`gemini-flash` (Antigravity, keyless) · `hermes` / `-m <any>` (your Hermes setup, whatever model + provider keys you've configured) · `ollama:<model>`/`local` (your own machine, keyless, `$0`, private) · `gpt-image`/`nano-banana` (images).
+`gemini-pro`/`gemini-flash` (Antigravity, keyless) · `hermes` / `-m <any>` (your Hermes setup, whatever model + provider keys you've configured) · `--provider opencode -m <provider/model>` (your OpenCode setup) · `ollama:<model>`/`local` (your own machine, keyless, `$0`, private) · `gpt-image`/`nano-banana` (images).
 
 Add capability to one offload with `--with skills=<name>` / `--with mcp=<name>`.
+
+### OpenCode lane
+
+Install OpenCode from [its installation guide](https://opencode.ai/docs/), then run `opencode` once to configure a provider and authenticate. Use `--provider opencode -m <provider/model>`; its model catalog, credentials, and billing remain OpenCode's, so cash and plan use depend on your selected provider and model.
+
+For a safe one-shot review, Outsourcerer runs `opencode run` with OpenCode's `plan` agent. That agent's permissions are still your OpenCode configuration. OpenCode documents its headless `--auto` flag as dangerous because it auto-approves permissions, so Outsourcerer intentionally does not use it for `edit`/`research`/`yolo`. For a change, start a supervised session instead: `outsourcerer --provider opencode session start -m <provider/model>`. It opens the OpenCode TUI with its `build` agent; you can inspect and answer approvals through the session.
 
 </details>
 
