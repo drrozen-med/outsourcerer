@@ -80,6 +80,17 @@ else
   bad "missing OpenCode CLI did not fail fast: rc=$rc out=$out"
 fi
 
+_lanes="$(_ready_lanes 2>/dev/null || true)"
+case "$_lanes" in *opencode*) ok "ready-lane brief advertises OpenCode" ;; *) bad "brief omits OpenCode: $_lanes" ;; esac
+
+: > "$OPENCODE_LOG"
+SEAM="$(bash "$SRC" run --provider opencode --cloud-ack --wait -m big-pickle/free x </dev/null 2>&1 || true)"
+if grep -q -- '--agent plan' "$OPENCODE_LOG" && grep -q -- '--model big-pickle/free' "$OPENCODE_LOG"; then
+  ok "router seam: run --provider opencode reaches OpenCode read-only with model verbatim"
+else
+  bad "router seam did not reach OpenCode as expected: log=$(cat "$OPENCODE_LOG" 2>/dev/null) out=$SEAM"
+fi
+
 echo
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
