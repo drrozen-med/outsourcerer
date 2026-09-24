@@ -904,7 +904,7 @@ parse_model() {
       --no-advise)          OSRC_NO_ADVISE=1; shift ;;   # opt out of auto-advise (parity with _consume_flags)
       --cloud-ack)          OSRC_CLOUD_ACK=1; shift ;;
       --trust-lane)         [ -n "${2:-}" ] || die "--trust-lane needs a lane name (e.g. devin)"; OSRC_TRUST_LANE_ONCE="${OSRC_TRUST_LANE_ONCE:-} $2"; shift 2 ;;
-      --provider)           [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local|tokenrouter)"; PROVIDER="$2"; PROVIDER_EXPLICIT=1; shift 2 ;;
+      --provider)           [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|opencode|gemini|gm|claudex|local|tokenrouter)"; PROVIDER="$2"; PROVIDER_EXPLICIT=1; shift 2 ;;
       --)                   shift; REST+=("$@"); break ;;
       *)                    REST+=("$1"); shift ;;
     esac
@@ -2730,7 +2730,7 @@ resolve_tier() {
 # disclosure but provider-cc -> or for quota/default-model; "codex" is cx's
 # native provider for session observation but or's transport provider elsewhere;
 # "gemini" is the paid-API lane gi for disclosure but gm's provider for routing):
-#   provider  (--provider):  devin|cc|codex|gemini|gm|droid|cursor|hermes|warp|cline|claudex|local|tokenrouter
+#   provider  (--provider):  devin|cc|codex|gemini|gm|droid|cursor|hermes|warp|cline|opencode|claudex|local|tokenrouter
 #   lane code (internal):    dv|or|cc|cx|gm|gi|ci|local|droid|cursor|hermes|warp|cline|claudex|tokenrouter
 #   disp      (vehicle):     devin|ccor|codexor|ccnative|cxnative|gmnative|claudex|droid|cursor|hermes|warp|cline|tokenrouter|local
 #
@@ -2799,7 +2799,7 @@ resolve_tier() {
 # FIRST and falls back to its legacy `case` arm for unported lanes; the fallback
 # arms retire as each lane lands.
 # =============================================================================
-OSRC_LANE_REGISTRY="local dv gm cx or cc gi ci droid cursor hermes warp cline claudex tokenrouter"
+OSRC_LANE_REGISTRY="local dv gm cx or cc gi ci droid cursor hermes warp cline opencode claudex tokenrouter"
 
 # _lane_field <lane> <field> -> the field's value, rc1 when unregistered or unset.
 _lane_field() {
@@ -3244,6 +3244,58 @@ _session_launch_cline() {
     else
       _session_launch_error "$provider" "help does not advertise an interactive model override"
     fi
+  fi
+}
+
+# ---- opencode (OpenCode — user-configured agent engine) --------------------
+# OpenCode owns both its provider/model catalog and its agent permission policy. Its
+# documented non-interactive --auto switch approves every permission not expressly
+# denied, so it is deliberately NOT used for an apparently ordinary edit tier here.
+# Headless work stays with the configured plan agent; changes belong in a supervised
+# interactive session, where OpenCode can ask the operator for each permission.
+lane_descriptor_opencode() {
+  printf '%s\n' \
+    "name=opencode" \
+    "providers=opencode" \
+    "provider_is_lane=yes" \
+    "owns_catalog=yes" \
+    "cli=opencode" \
+    "cli_missing_hint=opencode CLI not on PATH. Install it from https://opencode.ai/docs/ then run 'opencode' once to configure a provider and authenticate." \
+    "ready_fn=_ready_probe_opencode" \
+    "disp=opencode" \
+    "dispatch=delegate_opencode" \
+    "default_model=opencode-default" \
+    "session_fn=_session_launch_opencode" \
+    "quota_key=opencode" \
+    "cost_class=limited" \
+    "cost_disclosure=cash and plan usage depend on the provider and model configured in your OpenCode account" \
+    "is_cloud=yes" \
+    "fallback_provider=opencode" \
+    "participates_health=yes"
+}
+_ready_probe_opencode() { have opencode && printf 'opencode=user-configured-provider'; }
+
+# OpenCode's top-level command starts its interactive TUI. Interactive sessions
+# intentionally use the build agent by default: approvals remain visible and steerable.
+_session_launch_opencode() {
+  local provider="${provider:-$PROVIDER}" agent="${OSRC_OPENCODE_SESSION_AGENT:-build}"
+  have opencode || _session_launch_error "$provider" "opencode is not on PATH"
+  # Session start passes a provider token to the generic cloud gate, while that
+  # gate intentionally keys on dispatch vehicles. Gate OpenCode here so this new
+  # cloud lane never bypasses consent merely because it is interactive.
+  _cloud_disclose opencode "$MODEL" "interactive session in $PWD"
+  help_text="$(_session_probe_help opencode --help)" \
+    || _session_launch_error "$provider" "the local help probe failed or timed out"
+  printf '%s\n' "$help_text" | grep -Eqi 'start opencode tui|default.*tui|start.*interactive' \
+    || _session_launch_error "$provider" "help does not advertise its interactive TUI"
+  printf '%s\n' "$help_text" | grep -Eq -- '--agent([ =]|$)' \
+    || _session_launch_error "$provider" "help does not advertise an interactive agent override"
+  _validate_model_token "$agent"
+  SESSION_LAUNCH=("opencode" "--agent" "$agent")
+  if [ "$MODEL_EXPLICIT" = "1" ]; then
+    printf '%s\n' "$help_text" | grep -Eq -- '--model([ =]|$)' \
+      || _session_launch_error "$provider" "help does not advertise an interactive model override"
+    SESSION_LAUNCH+=("--model" "$MODEL")
   fi
 }
 
@@ -4638,10 +4690,10 @@ _consume_flags() {
       # Per-invocation trust grant. Assigned WITHOUT export on purpose: it must not be inherited by a
       # bg/fanout child, which re-evaluates trust from config for whatever repo it actually runs in.
       --trust-lane) [ -n "${2:-}" ] || die "--trust-lane needs a lane name (e.g. devin)"; OSRC_TRUST_LANE_ONCE="${OSRC_TRUST_LANE_ONCE:-} $2"; shift 2 ;;
-      --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local|tokenrouter)"; PROVIDER="$2"; PROVIDER_EXPLICIT=1; shift 2 ;;  # accepted AFTER the subcommand too (flag-placement tolerance)
+      --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|opencode|gemini|gm|claudex|local|tokenrouter)"; PROVIDER="$2"; PROVIDER_EXPLICIT=1; shift 2 ;;  # accepted AFTER the subcommand too (flag-placement tolerance)
       # `--provider=X` (equals spelling): without this it fell through to `*) break`, became REST/prompt text,
       # and the run silently used the devin default — the same explicit-lane-lost bug as the bg path.
-      --provider=*) PROVIDER="${1#--provider=}"; [ -n "$PROVIDER" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local|tokenrouter)"; PROVIDER_EXPLICIT=1; shift ;;
+      --provider=*) PROVIDER="${1#--provider=}"; [ -n "$PROVIDER" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|opencode|gemini|gm|claudex|local|tokenrouter)"; PROVIDER_EXPLICIT=1; shift ;;
       --wait|--foreground) OSRC_NO_AUTODETACH=1; shift ;;  # D3: force foreground even for slow lanes (escape hatch)
       --effort|--reasoning)
                   [ -n "${2:-}" ] || die "--effort requires: minimal|low|medium|high|xhigh|max"
@@ -8483,6 +8535,7 @@ _ready_lanes() {
   _rp="$(_lane_ready_probe droid 2>/dev/null)" && lanes="$lanes $_rp"
   _rp="$(_lane_ready_probe cursor 2>/dev/null)" && lanes="$lanes $_rp"
   _rp="$(_lane_ready_probe cline 2>/dev/null)" && lanes="$lanes $_rp"
+  _rp="$(_lane_ready_probe opencode 2>/dev/null)" && lanes="$lanes $_rp"
   _rp="$(_lane_ready_probe tokenrouter 2>/dev/null)" && lanes="$lanes $_rp"
   _rp="$(_lane_ready_probe claudex 2>/dev/null)" && lanes="$lanes $_rp"
   printf '%s\n' "${lanes# }"
@@ -10762,7 +10815,7 @@ _bg_capture_provider() {
     if [ "$_want_val" = "1" ]; then
       # empty value ( `--provider ""` ) fails loud here, mirroring the leading loop's `[ -n ]` guard,
       # instead of setting PROVIDER="" EXPLICIT=1 and dying later with the wrapped preflight error.
-      [ -n "$_tok" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local)"
+      [ -n "$_tok" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|opencode|gemini|gm|claudex|local)"
       PROVIDER="$_tok"; PROVIDER_EXPLICIT=1; _want_val=0; continue
     fi
     case "$_tok" in
@@ -10771,11 +10824,11 @@ _bg_capture_provider() {
       # prompt text, and route to the devin default — the very silent-fallback this fix exists to kill,
       # surviving in the equals spelling. Accept it (value normalized back to the space form downstream).
       --provider=*) PROVIDER="${_tok#--provider=}"; PROVIDER_EXPLICIT=1
-                    [ -n "$PROVIDER" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local)" ;;
+                    [ -n "$PROVIDER" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|opencode|gemini|gm|claudex|local)" ;;
       *)            _BG_ARGV+=("$_tok") ;;
     esac
   done
-  [ "$_want_val" = "1" ] && die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local)"
+  [ "$_want_val" = "1" ] && die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|opencode|gemini|gm|claudex|local)"
   return 0   # never inherit the trailing test's exit status (a bare `&& die` would return 1 on the happy path)
 }
 
@@ -10784,7 +10837,7 @@ cmd_bg() {
   while :; do case "${1:-}" in
     --worktree)  export OSRC_WORKTREE=1; shift ;;
     --cloud-ack) export OSRC_CLOUD_ACK=1; shift ;;
-    --provider)  [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local|tokenrouter)"; PROVIDER="$2"; PROVIDER_EXPLICIT=1; shift 2 ;;
+    --provider)  [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|opencode|gemini|gm|claudex|local|tokenrouter)"; PROVIDER="$2"; PROVIDER_EXPLICIT=1; shift 2 ;;
     *) break ;;
   esac; done
   [ $# -gt 0 ] || die "bg needs a task (e.g. bg \"map this repo\" or bg run -m glm \"...\")"
@@ -11179,7 +11232,7 @@ run_job() {
   # Engine lanes (droid/cursor) own their model catalog: -m passes through verbatim, and with no -m
   # the ENGINE's configured default runs -- never our alias table's, so don't record it as such.
   case "$prov" in
-    droid|cursor|hermes|warp|cline) lane="$prov"; [ "$MODEL_EXPLICIT" = "1" ] || id2="($prov default)" ;;
+    droid|cursor|hermes|warp|cline|opencode) lane="$prov"; [ "$MODEL_EXPLICIT" = "1" ] || id2="($prov default)" ;;
     # tokenrouter has NO default model (-m is required, the roster is the gateway's): a bg job on
     # this lane always carries an explicit model; just record the lane.
     tokenrouter)  lane="tokenrouter" ;;
@@ -13945,6 +13998,43 @@ delegate_cline() {
   return "$rc"
 }
 
+# OpenCode's documented non-interactive --auto switch approves every permission
+# not expressly denied. There is no edits-only headless capability, so this lane
+# makes only the read-only plan-agent path available without human supervision.
+delegate_opencode() {
+  local tier="$1"
+  [ "${#REST[@]}" -gt 0 ] || die "no task prompt given"
+  have opencode || die "opencode CLI not on PATH. Install it from https://opencode.ai/docs/ then run 'opencode' once to configure a provider and authenticate."
+  case "$tier" in
+    auto) ;;
+    *) die "opencode lane refuses headless $tier work: OpenCode's only non-interactive approval switch is '--auto', which auto-approves every permission and is documented as dangerous. Use '$0 --provider opencode session start -m <provider/model>' for a supervised interactive change, or configure an OpenCode agent that enforces your policy." ;;
+  esac
+
+  local task="${REST[*]}" id="${MODEL:-}" agent="${OSRC_OPENCODE_READ_AGENT:-plan}"
+  _validate_model_token "$agent"
+  local mflag=() variant=()
+  if [ "${MODEL_EXPLICIT:-0}" = "1" ] && [ -n "$id" ]; then
+    _validate_model_token "$id"
+    mflag=(--model "$id")
+  else
+    id="(opencode configured default)"
+  fi
+  if [ -n "${EFFORT:-}" ]; then
+    variant=(--variant "$EFFORT")
+    printf '>>> [effort] reasoning=%s (native: opencode --variant %s)\n' "$EFFORT" "$EFFORT" >&2
+  fi
+  local ttier; ttier="$(resolve_tier "${MODEL:-opencode}" "${TTIER:-}")" || ttier="capable"
+  _with_preamble_render "bundle"
+  local wrapped; wrapped="$(_build_prompt "${MODEL:-opencode}" "$task" "$ttier" "bundle")"
+  _tier_banner "opencode" "$id" "$ttier" "READ-ONLY (OpenCode agent '$agent'; permissions are enforced by its OpenCode configuration) | $(_lane_cost_disclosure opencode)"
+  local rc=0 _lerr; _lerr="$(_lane_errfile)"
+  _run_tee_stderr "$_lerr" opencode run --dir "$PWD" --agent "$agent" ${mflag[@]+"${mflag[@]}"} ${variant[@]+"${variant[@]}"} "$wrapped" || rc=$?
+  [ -n "$_lerr" ] && rm -f "$_lerr" 2>/dev/null
+  record_ledger opencode "${MODEL:-opencode-default}" "$ttier" "$tier" "$task" "" "opencode"
+  printf '>>> [receipt] ran through your OpenCode provider/model configuration; no Claude tokens spent.\n' >&2
+  return "$rc"
+}
+
 cmd_image_codex() {
   local prompt="$1" out="$2" ttier="$3"
   have codex || die "codex CLI not on PATH (needed for the codex/gpt-image backend)"
@@ -16019,7 +16109,7 @@ route_delegate() {
     else
     case "$PROVIDER" in
       devin) disp=devin ;;
-      *)     die "unknown provider '$PROVIDER' (use: devin|cc|codex|droid|cursor|hermes|warp|cline|claudex|local|tokenrouter)" ;;
+      *)     die "unknown provider '$PROVIDER' (use: devin|cc|codex|droid|cursor|hermes|warp|cline|opencode|claudex|local|tokenrouter)" ;;
     esac
     fi
   fi
@@ -17712,10 +17802,10 @@ _winpty_session() {
           # reasoning control this tool can set, so a requested --effort cannot be enforced here.
           [ -n "$EFFORT" ] && printf '>>> [effort] WARNING: --effort %s NOT applied to this Devin session — Devin'"'"'s interactive TUI has no reasoning control this tool can set; it runs at the TUI default. Set it in the TUI, or use `%s --provider devin run --effort %s ...` (exec honors -r).\n' "$EFFORT" "$0" "$EFFORT" >&2
           LAUNCH=("devin" "--model" "$MODEL" "--respect-workspace-trust" "false") ;;
-        codex|cx|droid|cursor|hermes|cline|gemini|gm|cc|claude)
+        codex|cx|droid|cursor|hermes|cline|opencode|gemini|gm|cc|claude)
           _session_launch_adapter "$PROVIDER"
           LAUNCH=("${SESSION_LAUNCH[@]}") ;;
-        *) die "session start: provider '$PROVIDER' not supported for interactive sessions (use --provider devin|codex|cc|droid|cursor|hermes|cline|gemini)" ;;
+        *) die "session start: provider '$PROVIDER' not supported for interactive sessions (use --provider devin|codex|cc|droid|cursor|hermes|cline|opencode|gemini)" ;;
       esac
 
       have winpty || die "winpty not found (needed for session on Windows; Git for Windows ships it)"
@@ -17904,10 +17994,10 @@ session() {
           # than running Low while the receipt implies otherwise, and name the paths that DO honor it.
           [ -n "$EFFORT" ] && printf '>>> [effort] WARNING: --effort %s NOT applied to this Devin session — Devin'"'"'s interactive TUI has no reasoning control this tool can set; it runs at the TUI default. Set it in the TUI, or use `%s --provider devin run --effort %s ...` (exec honors -r), or a lane that supports interactive effort.\n' "$EFFORT" "$0" "$EFFORT" >&2
           launch="devin --model '$MODEL' --respect-workspace-trust false" ;;   # single-quoted: a validated [1m]-style token must not glob-expand when send-keys hands it to the shell
-        codex|cx|droid|cursor|hermes|cline|gemini|gm|cc|claude)
+        codex|cx|droid|cursor|hermes|cline|opencode|gemini|gm|cc|claude)
           _session_launch_adapter "$PROVIDER"
           launch="$(_session_shell_command "${SESSION_LAUNCH[@]}")" ;;
-        *) die "session start: provider '$PROVIDER' not supported for interactive sessions (use --provider devin|codex|cc|droid|cursor|hermes|cline|gemini)" ;;
+        *) die "session start: provider '$PROVIDER' not supported for interactive sessions (use --provider devin|codex|cc|droid|cursor|hermes|cline|opencode|gemini)" ;;
       esac
       # Use has-session to avoid killing a concurrent session.
       _validate_session_name
@@ -18518,7 +18608,7 @@ doctor() {
   local _dm; if _dm="$(_mode_read 2>/dev/null)"; then echo "  driving mode: $_dm ($0 mode status)"; else echo "  driving mode: NOT SET — the session-start menu will show (set: $0 mode auto|manual|hybrid)"; fi
   if [ "$_doff" = "1" ]; then echo "  session limits: skipped (OSRC_DOCTOR_OFFLINE)  · conserve line: ${OSRC_CONSERVE_THRESHOLD}% of the 5h window"
   else local _lim; _lim="$(_session_limits 2>/dev/null)"; echo "  session limits: ${_lim:-unavailable (no readable meter)}  · conserve line: ${OSRC_CONSERVE_THRESHOLD}% of the 5h window"; fi
-  echo "  active provider: $PROVIDER  (switch with --provider devin|cc|codex|droid|cursor|hermes|warp|cline|claudex|local|tokenrouter or OUTSOURCERER_PROVIDER)"
+  echo "  active provider: $PROVIDER  (switch with --provider devin|cc|codex|droid|cursor|hermes|warp|cline|opencode|claudex|local|tokenrouter or OUTSOURCERER_PROVIDER)"
   echo "  -- OpenRouter lanes (cc / codex) --"
   if [ -f "$HOME/.env" ] && grep -q "OPENROUTER_API_KEY" "$HOME/.env" 2>/dev/null; then echo "    openrouter key: present in ~/.env"; else echo "    openrouter key: MISSING from ~/.env"; fi
   have claude && echo "    claude (cc lane):    $(claude --version 2>/dev/null | head -1)" || echo "    claude (cc lane):    NOT on PATH"
@@ -18635,6 +18725,13 @@ doctor() {
     fi
   else
     echo "    cline: NOT on PATH — install: npm i -g cline  (or see https://github.com/cline/cline), then 'cline auth cline' to sign in to ClinePass (discounted open-weight models), or configure your own keys in ~/.cline"
+  fi
+  echo "  -- OpenCode lane (engine lane: provider/model, authentication, and permissions are configured in OpenCode) --"
+  if have opencode; then
+    echo "    opencode: $(opencode --version 2>/dev/null | head -1 || echo present) — route: --provider opencode [-m <provider/model>] run \"task\". Cost: $(_lane_cost_disclosure opencode)."
+    echo "      headless run uses the OpenCode plan agent; mutating work is intentionally interactive because OpenCode --auto approves permissions and is documented as dangerous."
+  else
+    echo "    opencode: NOT on PATH — install: https://opencode.ai/docs/ then run 'opencode' once to configure a provider and authenticate"
   fi
   echo "  -- Claudex lane (GPT-5.6 Sol/Terra INSIDE the Claude Code harness, via YOUR local CLIProxyAPI) --"
   if [ "$_doff" = "1" ]; then echo "    claudex: probe skipped (OSRC_DOCTOR_OFFLINE)"
@@ -19485,7 +19582,7 @@ main() {
   # being read as an "unknown subcommand" and costing whole retry round-trips -- never again.
   while :; do
     case "${1:-}" in
-      --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local|tokenrouter)"
+      --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|opencode|gemini|gm|claudex|local|tokenrouter)"
                   PROVIDER="$2"; PROVIDER_EXPLICIT=1; shift 2 ;;
       --cloud-ack) export OSRC_CLOUD_ACK=1; shift ;;
       *) break ;;
@@ -19566,7 +19663,7 @@ main() {
     *) case "$cmd" in
          -*) die "'$cmd' looks like a flag, not a subcommand. Global flags (--provider X, --cloud-ack) are accepted before OR after the subcommand, but a subcommand is required. Example: $0 run --provider cc --cloud-ack \"task\"" ;;
        esac
-       die "unknown subcommand '$cmd' (try: doctor|brief|mode|consent|models|run|research|edit|yolo|explore|deals|bg|fanout|fleet|status|classify|explain|rundown|bearings|heartbeat|watch|wait|result|logs|cancel|cleanup|tab|estimate|suggest|advise|second-opinion|image|continue|session|parity|parity-codex|parity-droid|parity-cursor|parity-hermes; providers: devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local|tokenrouter)" ;;
+       die "unknown subcommand '$cmd' (try: doctor|brief|mode|consent|models|run|research|edit|yolo|explore|deals|bg|fanout|fleet|status|classify|explain|rundown|bearings|heartbeat|watch|wait|result|logs|cancel|cleanup|tab|estimate|suggest|advise|second-opinion|image|continue|session|parity|parity-codex|parity-droid|parity-cursor|parity-hermes; providers: devin|cc|codex|droid|cursor|hermes|warp|cline|opencode|gemini|gm|claudex|local|tokenrouter)" ;;
 
   esac
   # ---- blind-turn guard: refuse to end the orchestrating turn while live delegated work needs a

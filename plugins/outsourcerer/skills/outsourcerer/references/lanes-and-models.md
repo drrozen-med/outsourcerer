@@ -90,6 +90,24 @@ needs no key). Symmetrically `-m fable --provider codex` dies (Claude-backend-on
 "…"` and `run -m sol "…"` need no `--provider` at all. See the full alias/lane/tier map:
 `outsourcerer.sh models --refresh`.
 
+## OpenCode lane (`--provider opencode`)
+
+`--provider opencode` delegates through the OpenCode CLI (https://opencode.ai) the user already runs,
+with the provider and model THEY configured. Cash and plan usage depend on that configuration: the
+built-in `opencode/*` provider carries free models whose roster rotates, others bill the user's own
+account. Do NOT hardcode a model or price; check `opencode models --verbose` for the live list.
+
+- `-m <provider/model>` passes through **verbatim** (the alias table never rewrites it); `--effort`
+  maps to OpenCode's `--variant`. No `-m` = OpenCode's configured default.
+- **Headless `run`/`explore` are read-only:** they use OpenCode's `plan` agent (override with
+  `OSRC_OPENCODE_READ_AGENT`). The write tiers (`edit`/`research`/`yolo`) are REFUSED with a pointer
+  to the supervised path, because headless OpenCode has no reliable read-only-vs-write switch beyond
+  agent choice.
+- **Edits go through a supervised session:** `session start --provider opencode` launches the
+  interactive TUI with the `build` agent (override with `OSRC_OPENCODE_SESSION_AGENT`), so a human or
+  the orchestrator can watch and answer permission prompts.
+- Cloud lane: the standard cloud disclosure/ack gate applies (`OSRC_CLOUD_ACK=1` for non-interactive use).
+
 ## Cline lane (`--provider cline`)
 
 `--provider cline` delegates through the Cline CLI (https://github.com/cline/cline) the user
