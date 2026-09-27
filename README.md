@@ -313,15 +313,19 @@ The model alias picks the lane automatically; `--provider` is only for the OpenR
 
 **Lanes:** `hy3`/`glm-5.2`/`deepseek-*` (OpenRouter, via `cc` or `codex`) ·
 `sol`/`terra`/`luna` (Codex native) · `fable`/`opus`/`sonnet`/`haiku` (Claude native) ·
-`gemini-pro`/`gemini-flash` (Antigravity, keyless) · `hermes` / `-m <any>` (your Hermes setup, whatever model + provider keys you've configured) · `--provider opencode -m <provider/model>` (your OpenCode setup) · `ollama:<model>`/`local` (your own machine, keyless, `$0`, private) · `gpt-image`/`nano-banana` (images).
+`gemini-pro`/`gemini-flash` (Antigravity, keyless) · `hermes` / `-m <any>` (your Hermes setup, whatever model + provider keys you've configured) · `--provider opencode` (`-m free`/`free-large`/`free-fast` = $0 Zen models, or any `-m <provider/model>` from your OpenCode setup) · `ollama:<model>`/`local` (your own machine, keyless, `$0`, private) · `gpt-image`/`nano-banana` (images).
 
 Add capability to one offload with `--with skills=<name>` / `--with mcp=<name>`.
 
 ### OpenCode lane
 
-Install OpenCode from [its installation guide](https://opencode.ai/docs/), then run `opencode` once to configure a provider and authenticate. Use `--provider opencode -m <provider/model>`; its model catalog, credentials, and billing remain OpenCode's, so cash and plan use depend on your selected provider and model.
+Install OpenCode from [its installation guide](https://opencode.ai/docs/), then run `opencode` once to configure a provider and authenticate. OpenCode is a full lane: `run`, `research`, `edit`, `yolo`, and `session` all work.
 
-For a safe one-shot review, Outsourcerer runs `opencode run` with OpenCode's `plan` agent. That agent's permissions are still your OpenCode configuration. OpenCode documents its headless `--auto` flag as dangerous because it auto-approves permissions, so Outsourcerer intentionally does not use it for `edit`/`research`/`yolo`. For a change, start a supervised session instead: `outsourcerer --provider opencode session start -m <provider/model>`. It opens the OpenCode TUI with its `build` agent; you can inspect and answer approvals through the session.
+**Free by default.** With no `-m`, the lane runs `opencode/big-pickle` — a $0 model on OpenCode's built-in Zen provider. Aliases: `-m free` (the same default), `-m free-large` (`opencode/muse-spark-1.3-contributor-free`, 1M ctx), `-m free-fast` (`opencode/nemotron-3.5-lightning-free`). The free models work only through the `opencode` CLI (the Zen HTTP API rejects them from other clients), which is why they live here as a lane. Any other `-m <provider/model>` passes through verbatim and bills whatever your OpenCode account says; `opencode models --verbose` lists the live roster.
+
+Read-only one-shots (`run`/`explore`) use OpenCode's `plan` agent. `edit`/`research`/`yolo` run headless under a scoped per-run config: Outsourcerer writes a temporary OpenCode config to a private temp dir (never your repo), points `OPENCODE_CONFIG` at it for that run only, and deletes it after. It auto-allows edits, bash, and webfetch inside the working directory, denies the question tool, and denies external-directory access for `edit`/`research` (`yolo` allows it). OpenCode's dangerous global `--auto` is never used.
+
+`outsourcerer --provider opencode session start -m free` opens the OpenCode TUI in tmux with the `build` agent and the resolved model; `session send` steers it. If a free model reports a quota/limit error, Outsourcerer probes before marking the lane down and hands off to a configured fallback lane like any other.
 
 </details>
 

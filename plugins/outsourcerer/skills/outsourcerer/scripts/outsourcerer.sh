@@ -100,6 +100,16 @@
 #                     (single-key extraction). TEXT delegation only (no agentic tool exec); CLOUD
 #                     lane (cloud-consent gate + secret-scan). Some models are a $0 promo RIGHT NOW
 #                     -- confirmed at runtime by billing/quota errors (402/429), never a hardcoded date.
+#   opencode          OpenCode CLI (https://opencode.ai). Engine lane: -m passes through verbatim
+#                     to OpenCode's provider/model catalog. Default and aliases ride the Zen FREE
+#                     roster ($0): free = opencode/big-pickle (default), free-large =
+#                     opencode/muse-spark-1.3-contributor-free (1M ctx), free-fast =
+#                     opencode/nemotron-3.5-lightning-free. Free models work ONLY through the
+#                     opencode CLI (the Zen HTTP API rejects them with FreeTierError). Headless
+#                     run/explore use the read-only plan agent; edit/research/yolo run under a
+#                     per-run temp OPENCODE_CONFIG that auto-allows edit+bash+webfetch inside the
+#                     workdir (external_directory denied; yolo allows it) — never the dangerous
+#                     global --auto. `session start` launches the interactive TUI in tmux.
 #   local             Ollama / LM Studio / llama.cpp (also selectable via -m ollama:<m> etc).
 # Reverse bridges (work FROM the other tool): parity-codex | parity-droid | parity-cursor (AGENTS.md
 # hosts) and parity-hermes (SKILL.md host, symlink into ~/.hermes/skills) teach that host agent to
@@ -805,6 +815,25 @@ _lane_free_probe() {
       fi
       if _lane_meter_saturated "$lane"; then printf 'limit-refused'; else printf 'unreachable'; fi
       return 0 ;;
+    opencode)
+      # Real bounded request on the free roster (the cheap, safe recipe for this lane): a
+      # read-only `opencode run` on a small free model. A limit signature in its stderr
+      # (FreeTierError / 402 / 429) CONFIRMS; rc0 means the lane still answers; anything
+      # else is unreachable/inconclusive, never invented capacity.
+      if _mkdir_private "$OSRC_HOME" >/dev/null 2>&1; then
+        out="$(_lane_probe_file "$lane")"
+        : > "$out" 2>/dev/null && chmod 600 "$out" 2>/dev/null || out=""
+      fi
+      if ! have opencode; then
+        [ -n "$out" ] && printf 'opencode CLI not on PATH\n' > "$out"
+        printf 'unreachable'; return 0
+      fi
+      _timeout "$secs" opencode run --dir "$PWD" --agent "${OSRC_OPENCODE_READ_AGENT:-plan}" \
+        --model "${OSRC_OPENCODE_PROBE_MODEL:-opencode/nemotron-3.5-lightning-free}" "PONG" \
+        </dev/null > "${out:-/dev/null}" 2>&1 || rc=$?
+      if [ -n "$out" ] && _lane_plan_limit_refusal opencode "$out"; then printf 'limit-refused'; return 0; fi
+      if [ "$rc" -eq 0 ]; then printf 'answered'; return 0; fi
+      printf 'unreachable'; return 0 ;;
     *) printf 'unreachable'; return 2 ;;
   esac
   if _mkdir_private "$OSRC_HOME" >/dev/null 2>&1; then
@@ -1344,8 +1373,14 @@ _CURSOR_PLAN_LIMIT_RE="you'?ve hit your usage limit|usage limits? will reset|spe
 _WARP_PLAN_LIMIT_RE="error:[[:space:]]*quota ?limit|quota limit (reached|exceeded|hit)|(monthly|ai)[ -]?(credit|request)[ -]?(limit|quota)[^.]{0,40}(exceeded|reached|exhausted)|(exceed(ed)?|reached) your (monthly )?(credit|ai request) limit|premium models (will be|are) disabled until"
 _DROID_PLAN_LIMIT_RE="rate limit (reached|exceeded|hit|error)|(included|plan|5[- ]?hour|weekly|monthly) usage[^.]{0,40}(exhausted|reached|used up|limit)|run /limits|extra usage[^.]{0,40}(enable|toggle|continue|retry)"
 _CLINE_PLAN_LIMIT_RE="inference_cap_error|daily (free )?limit reached|(daily|weekly|monthly) (free )?(limit|quota|cap)[^.]{0,30}(reached|exceeded|exhausted)|rate_limit_error[^}]{0,200}(daily|weekly|monthly|quota)"
+#   opencode        Zen free-tier rejections surface as "FreeTierError" / "usage limit" /
+#                   "buy credits" / HTTP 402 (payment required) or 429 (too many requests).
+#                   A bare 402|429 counts ONLY digit-delimited (a year or a line number in
+#                   task prose cannot match); the probe-then-decide block still verifies
+#                   before any long lane-down mark.
+_OPENCODE_PLAN_LIMIT_RE="freetiererror|usage limit|buy credits|payment required|too many requests|insufficient (credits|balance|quota)|quota (exceeded|exhausted)|credit limit|free[ -]?tier[^.]{0,40}(limit|exceeded|exhausted|error)|(^|[^0-9])(402|429)([^0-9]|$)"
 # The subscription lanes the generic meter / block know about (dv keeps its bespoke block + meter).
-OSRC_PLAN_LANES="dv cx cc warp droid cursor cline gm"
+OSRC_PLAN_LANES="dv cx cc warp droid cursor cline gm opencode"
 
 # _lane_plan_key <lane-code|disp|provider> -> the canonical quota-pool key (dv/cx/cc/warp/...), or empty.
 # Lane context FIRST (`cc` here means the Claude-native lane, not or's transport provider), then the
@@ -1369,6 +1404,7 @@ _lane_plan_limit_re() {
     warp)   printf '%s' "$_WARP_PLAN_LIMIT_RE" ;;
     droid)  printf '%s' "$_DROID_PLAN_LIMIT_RE" ;;
     cline)  printf '%s' "$_CLINE_PLAN_LIMIT_RE" ;;
+    opencode) printf '%s' "$_OPENCODE_PLAN_LIMIT_RE" ;;
     *)      printf '' ;;
   esac
 }
@@ -1430,7 +1466,9 @@ _lane_plan_display() {
   case "$(_lane_plan_key "${1:-}")" in
     dv) printf 'Devin' ;; cx) printf 'Codex (ChatGPT plan)' ;; cc) printf 'Claude Code (Claude plan)' ;;
     warp) printf 'Warp (Oz)' ;; droid) printf 'Droid (Factory)' ;; cursor) printf 'Cursor' ;;
-    cline) printf 'Cline' ;; gm) printf 'Gemini CLI' ;; or) printf 'OpenRouter (cash)' ;;
+    cline) printf 'Cline' ;; gm) printf 'Gemini CLI' ;;
+    opencode) printf 'OpenCode (Zen free tier / configured providers)' ;;
+    or) printf 'OpenRouter (cash)' ;;
     tokenrouter) printf 'TokenRouter (cash)' ;; claudex) printf 'Claudex proxy' ;; local) printf 'local' ;;
     *) printf '%s' "${1:-?}" ;;
   esac
@@ -1443,6 +1481,7 @@ _lane_plan_usage_hint() {
     droid)  printf 'Live figure: /limits inside droid (toggle Droid Core / Extra Usage there), or Settings > Usage.' ;;
     cursor) printf 'Live figure: the Cursor dashboard (Settings > Usage).' ;;
     cline)  printf 'Live figure: your Cline account / provider dashboard.' ;;
+    opencode) printf 'Live figure: `opencode models --verbose` (cost/context) and your Zen/provider dashboard.' ;;
     *)      printf '' ;;
   esac
 }
@@ -3247,12 +3286,17 @@ _session_launch_cline() {
   fi
 }
 
-# ---- opencode (OpenCode — user-configured agent engine) --------------------
-# OpenCode owns both its provider/model catalog and its agent permission policy. Its
-# documented non-interactive --auto switch approves every permission not expressly
-# denied, so it is deliberately NOT used for an apparently ordinary edit tier here.
-# Headless work stays with the configured plan agent; changes belong in a supervised
-# interactive session, where OpenCode can ask the operator for each permission.
+# ---- opencode (OpenCode — user-configured agent engine, FREE Zen models) ------
+# OpenCode owns its provider/model catalog. Its documented non-interactive --auto
+# switch approves every permission not expressly denied, so it is NEVER used here.
+# Mutating headless tiers instead run under a PER-RUN temp config (OPENCODE_CONFIG,
+# written to a private mktemp dir, never the repo): a lane-local agent whose scoped
+# permission block grants edit/bash inside the working directory and denies
+# external_directory (dangerous tier may allow it). Agent-scoped rules are the
+# enforcement: they evaluate LAST in OpenCode's ruleset, so a project opencode.json
+# that denies edits cannot silently downgrade the tier back to read-only
+# (verified live: project-level `edit: deny` loses to the agent's `edit: allow`).
+# Headless read-only work stays on the configured plan agent.
 lane_descriptor_opencode() {
   printf '%s\n' \
     "name=opencode" \
@@ -3264,16 +3308,115 @@ lane_descriptor_opencode() {
     "ready_fn=_ready_probe_opencode" \
     "disp=opencode" \
     "dispatch=delegate_opencode" \
-    "default_model=opencode-default" \
+    "default_model=opencode/big-pickle" \
     "session_fn=_session_launch_opencode" \
+    "session_resolved_fn=_opencode_model_alias" \
+    "fallback_ready_fn=_fallback_ready_opencode" \
     "quota_key=opencode" \
     "cost_class=limited" \
-    "cost_disclosure=cash and plan usage depend on the provider and model configured in your OpenCode account" \
+    "cost_disclosure=\$0 on the opencode/* free models (Zen free tier); other providers/models bill the account configured in your OpenCode setup" \
     "is_cloud=yes" \
     "fallback_provider=opencode" \
     "participates_health=yes"
 }
 _ready_probe_opencode() { have opencode && printf 'opencode=user-configured-provider'; }
+_fallback_ready_opencode() { have opencode || return 1; }
+
+# _opencode_model_alias <id> -> the launchable provider/model id. Lane-LOCAL aliases
+# (they resolve inside delegate/session only — never the global alias table, so a
+# bare `-m free` elsewhere is untouched): the OpenCode Zen free roster, reachable
+# ONLY through the opencode CLI (the Zen HTTP API rejects free models from other
+# clients with FreeTierError). Anything else passes through verbatim — OpenCode owns
+# its catalog.
+_opencode_model_alias() {
+  case "${1:-}" in
+    free)      printf 'opencode/big-pickle' ;;
+    free-large) printf 'opencode/muse-spark-1.3-contributor-free' ;;
+    free-fast) printf 'opencode/nemotron-3.5-lightning-free' ;;
+    ''|default) printf 'opencode/big-pickle' ;;
+    *)         printf '%s' "$1" ;;
+  esac
+}
+# _opencode_cost_note <model> -> honest per-model cost text for the tier banner.
+# opencode/* ids ending in -free (and big-pickle) are $0 on the Zen free tier; other
+# opencode/* ids and BYOK providers bill whatever the user's OpenCode setup says.
+_opencode_cost_note() {
+  case "${1:-}" in
+    opencode/big-pickle|opencode/*-free|opencode/*free) printf '$0 (OpenCode Zen free tier; free only through the opencode CLI)' ;;
+    opencode/*) printf 'OpenCode Zen model — verify cost with: opencode models --verbose' ;;
+    *)          _lane_cost_disclosure opencode ;;
+  esac
+}
+# _opencode_write_tier_config <accept-edits|autonomous|dangerous> -> writes a per-run
+# OpenCode config into a PRIVATE mktemp dir (never the repo) and echoes
+# "<cfg-path>|<agent-name>". The agent's permission block is the enforcement point:
+# it allows edit/write/bash/webfetch inside the working directory, denies the
+# `question` tool (a headless ask would hang), and scopes external_directory — deny
+# for edit/autonomous, allow for dangerous (yolo is the all-tools tier). The
+# top-level permission block mirrors the same posture as a fallback for builds where
+# the agent field is ignored. Caller rm -rf's the dir after the run.
+_opencode_write_tier_config() {
+  local tier="$1" dir cfg agent extdir
+  case "$tier" in
+    accept-edits|autonomous) agent="osrc-edit"; extdir="deny" ;;
+    dangerous)               agent="osrc-yolo"; extdir="allow" ;;
+    *) return 1 ;;
+  esac
+  dir="$(mktemp -d "${TMPDIR:-/tmp}/osrc-opencode.XXXXXX" 2>/dev/null)" || return 1
+  cfg="$dir/opencode.json"
+  ( umask 077; cat > "$cfg" ) <<_OSRC_OC_CFG || { rm -rf "$dir" 2>/dev/null; return 1; }
+{
+  "\$schema": "https://opencode.ai/config.json",
+  "permission": {
+    "edit": "allow",
+    "write": "allow",
+    "bash": "allow",
+    "webfetch": "allow",
+    "external_directory": "$extdir"
+  },
+  "agent": {
+    "$agent": {
+      "permission": {
+        "edit": "allow",
+        "write": "allow",
+        "bash": "allow",
+        "webfetch": "allow",
+        "question": "deny",
+        "external_directory": "$extdir"
+      }
+    }
+  }
+}
+_OSRC_OC_CFG
+  [ -s "$cfg" ] || { rm -rf "$dir" 2>/dev/null; return 1; }
+  printf '%s|%s' "$cfg" "$agent"
+}
+# _opencode_tier_posture <tier> <agent> -> the honest banner posture string.
+_opencode_tier_posture() {
+  case "$1" in
+    accept-edits) printf 'MUTATING (temp per-run OpenCode config: agent %s auto-allows edit+write+bash+webfetch inside the workdir, external_directory DENIED; never --auto)' "$2" ;;
+    autonomous)   printf 'MUTATING (temp per-run OpenCode config: agent %s auto-allows edit+write+bash+webfetch inside the workdir, external_directory DENIED — OpenCode has no OS sandbox; this scoped config is the closest posture; never --auto)' "$2" ;;
+    dangerous)    printf 'DANGER (temp per-run OpenCode config: agent %s auto-allows ALL tools incl. external_directory; no sandbox; never --auto)' "$2" ;;
+    *)            printf '%s' "$1" ;;
+  esac
+}
+# _opencode_after_run <model> <rc> <capfile> -> post-run failure classification for the
+# lane. Plan/quota refusals (FreeTierError, usage limit, 402/429, buy credits) go through
+# the generic plan-limit block, which writes the failover signal route_delegate reads —
+# so a configured fallback picks the task up exactly like on the other lanes. A
+# transport-class failure (network drop / upstream error) gets a clear report line;
+# engine lanes never auto-retry transport failures (parity with droid/cursor/cline).
+_opencode_after_run() {
+  local model="$1" rc="$2" f="${3:-}"
+  _lane_plan_limit_after_run opencode "$f" "$model" "$rc"
+  [ "$rc" -ne 0 ] || return 0
+  [ -n "$f" ] && [ -s "$f" ] || return 0
+  _lane_plan_limit_refusal opencode "$f" && return 0
+  if _is_transport_failure "$(cat "$f" 2>/dev/null)" "$rc"; then
+    printf '>>> [opencode] transport failure (rc=%s): network drop or upstream error, not a task failure — the task never got a real answer. Retry the run, or hand it to another lane explicitly (--provider devin|codex|cc|local).\n' "$rc" >&2
+  fi
+  return 0
+}
 
 # OpenCode's top-level command starts its interactive TUI. Interactive sessions
 # intentionally use the build agent by default: approvals remain visible and steerable.
@@ -3291,12 +3434,20 @@ _session_launch_opencode() {
   printf '%s\n' "$help_text" | grep -Eq -- '--agent([ =]|$)' \
     || _session_launch_error "$provider" "help does not advertise an interactive agent override"
   _validate_model_token "$agent"
+  # The lane default is a free Zen model; resolve lane aliases (free/free-large/
+  # free-fast) and always pin --model so the session does not silently ride whatever
+  # the user's OpenCode config happens to default to (billing honesty).
+  MODEL="$(_opencode_model_alias "$MODEL")"
+  _validate_model_token "$MODEL"
+  # --effort has no interactive equivalent: `--variant` exists only under
+  # `opencode run --help`, not at the top level (verified against the live CLI).
+  # Say so rather than silently dropping it.
+  [ -n "${EFFORT:-}" ] \
+    && printf '>>> [effort] WARNING: --effort %s NOT applied to this OpenCode session — the interactive TUI has no reasoning flag at the top level (`--variant` exists only under `opencode run`). Set the variant in the TUI, or use `%s --provider opencode run --effort %s ...` which honors it natively.\n' "$EFFORT" "$0" "$EFFORT" >&2
   SESSION_LAUNCH=("opencode" "--agent" "$agent")
-  if [ "$MODEL_EXPLICIT" = "1" ]; then
-    printf '%s\n' "$help_text" | grep -Eq -- '--model([ =]|$)' \
-      || _session_launch_error "$provider" "help does not advertise an interactive model override"
-    SESSION_LAUNCH+=("--model" "$MODEL")
-  fi
+  printf '%s\n' "$help_text" | grep -Eq -- '--model([ =]|$)|(^|[[:space:],])-m([[:space:],]|$)' \
+    || _session_launch_error "$provider" "help does not advertise an interactive model override"
+  SESSION_LAUNCH+=("--model" "$MODEL")
 }
 
 # ---- tokenrouter (TokenRouter gateway — keyed, no CLI) -----------------------
@@ -11232,7 +11383,9 @@ run_job() {
   # Engine lanes (droid/cursor) own their model catalog: -m passes through verbatim, and with no -m
   # the ENGINE's configured default runs -- never our alias table's, so don't record it as such.
   case "$prov" in
-    droid|cursor|hermes|warp|cline|opencode) lane="$prov"; [ "$MODEL_EXPLICIT" = "1" ] || id2="($prov default)" ;;
+    droid|cursor|hermes|warp|cline) lane="$prov"; [ "$MODEL_EXPLICIT" = "1" ] || id2="($prov default)" ;;
+    # opencode's lane default is a real free model id (opencode/big-pickle), not "(opencode default)".
+    opencode)   lane="$prov"; [ "$MODEL_EXPLICIT" = "1" ] || id2="opencode/big-pickle" ;;
     # tokenrouter has NO default model (-m is required, the roster is the gateway's): a bg job on
     # this lane always carries an explicit model; just record the lane.
     tokenrouter)  lane="tokenrouter" ;;
@@ -13999,38 +14152,52 @@ delegate_cline() {
 }
 
 # OpenCode's documented non-interactive --auto switch approves every permission
-# not expressly denied. There is no edits-only headless capability, so this lane
-# makes only the read-only plan-agent path available without human supervision.
+# not expressly denied, so it is never passed. Read-only tiers run on the plan
+# agent; mutating tiers run on a per-run agent defined in a PRIVATE temp
+# OPENCODE_CONFIG whose agent-scoped permission rules evaluate after (and so
+# override) any project opencode.json — a repo cannot silently veto the tier back
+# to read-only. The temp dir is removed right after the run.
 delegate_opencode() {
   local tier="$1"
   [ "${#REST[@]}" -gt 0 ] || die "no task prompt given"
   have opencode || die "opencode CLI not on PATH. Install it from https://opencode.ai/docs/ then run 'opencode' once to configure a provider and authenticate."
-  case "$tier" in
-    auto) ;;
-    *) die "opencode lane refuses headless $tier work: OpenCode's only non-interactive approval switch is '--auto', which auto-approves every permission and is documented as dangerous. Use '$0 --provider opencode session start -m <provider/model>' for a supervised interactive change, or configure an OpenCode agent that enforces your policy." ;;
-  esac
 
-  local task="${REST[*]}" id="${MODEL:-}" agent="${OSRC_OPENCODE_READ_AGENT:-plan}"
-  _validate_model_token "$agent"
-  local mflag=() variant=()
-  if [ "${MODEL_EXPLICIT:-0}" = "1" ] && [ -n "$id" ]; then
-    _validate_model_token "$id"
-    mflag=(--model "$id")
-  else
-    id="(opencode configured default)"
-  fi
+  local task="${REST[*]}" id agent posture="" ocfg="" oagent="" variant=()
+  id="$(_opencode_model_alias "${MODEL:-opencode/big-pickle}")"
+  _validate_model_token "$id"
+  local mflag=(--model "$id")
   if [ -n "${EFFORT:-}" ]; then
     variant=(--variant "$EFFORT")
     printf '>>> [effort] reasoning=%s (native: opencode --variant %s)\n' "$EFFORT" "$EFFORT" >&2
   fi
-  local ttier; ttier="$(resolve_tier "${MODEL:-opencode}" "${TTIER:-}")" || ttier="capable"
+  local ttier; ttier="$(resolve_tier "$id" "${TTIER:-}")" || ttier="capable"
   _with_preamble_render "bundle"
-  local wrapped; wrapped="$(_build_prompt "${MODEL:-opencode}" "$task" "$ttier" "bundle")"
-  _tier_banner "opencode" "$id" "$ttier" "READ-ONLY (OpenCode agent '$agent'; permissions are enforced by its OpenCode configuration) | $(_lane_cost_disclosure opencode)"
+  local wrapped; wrapped="$(_build_prompt "$id" "$task" "$ttier" "bundle")"
+
+  case "$tier" in
+    auto)
+      agent="${OSRC_OPENCODE_READ_AGENT:-plan}"
+      _validate_model_token "$agent"
+      posture="READ-ONLY (OpenCode agent '$agent'; permissions are enforced by its OpenCode configuration)" ;;
+    accept-edits|autonomous|dangerous)
+      ocfg="$(_opencode_write_tier_config "$tier")" \
+        || die "opencode lane: could not write the scoped per-run permission config (mktemp failed)"
+      oagent="${ocfg##*|}"; ocfg="${ocfg%|*}"
+      posture="$(_opencode_tier_posture "$tier" "$oagent")" ;;
+    *) die "bad tier: $tier" ;;
+  esac
+  _tier_banner "opencode" "$id" "$ttier" "$posture | $(_opencode_cost_note "$id")"
+
   local rc=0 _lerr; _lerr="$(_lane_errfile)"
-  _run_tee_stderr "$_lerr" opencode run --dir "$PWD" --agent "$agent" ${mflag[@]+"${mflag[@]}"} ${variant[@]+"${variant[@]}"} "$wrapped" || rc=$?
+  if [ -n "$ocfg" ]; then
+    OPENCODE_CONFIG="$ocfg" _run_tee_stderr "$_lerr" opencode run --dir "$PWD" --agent "$oagent" "${mflag[@]}" ${variant[@]+"${variant[@]}"} "$wrapped" || rc=$?
+    rm -rf "$(dirname "$ocfg")" 2>/dev/null || true
+  else
+    _run_tee_stderr "$_lerr" opencode run --dir "$PWD" --agent "$agent" "${mflag[@]}" ${variant[@]+"${variant[@]}"} "$wrapped" || rc=$?
+  fi
+  _opencode_after_run "$id" "$rc" "$_lerr"
   [ -n "$_lerr" ] && rm -f "$_lerr" 2>/dev/null
-  record_ledger opencode "${MODEL:-opencode-default}" "$ttier" "$tier" "$task" "" "opencode"
+  record_ledger opencode "$id" "$ttier" "$tier" "$task" "" "opencode"
   printf '>>> [receipt] ran through your OpenCode provider/model configuration; no Claude tokens spent.\n' >&2
   return "$rc"
 }
@@ -15646,7 +15813,7 @@ _gate_hop() {
 # =============================================================================
 # Lane preference order for a hop: plan/subscription lanes first, cash lanes last. `local` is left
 # out on purpose (no model-equivalence claim can be made for whatever the user pulled locally).
-OSRC_FAILOVER_LANES="cc cx gm dv droid warp cursor cline or tokenrouter claudex"
+OSRC_FAILOVER_LANES="cc cx gm dv droid warp cursor cline opencode or tokenrouter claudex"
 _FAILOVER_CASH_SKIPPED=""   # in-process mirror; the file below is the source of truth across $(...)
 _FO_LANE=""; _FO_MODEL=""; _FO_VERDICT=""; _FO_REASON=""; _FO_RESET=""
 
@@ -18728,8 +18895,8 @@ doctor() {
   fi
   echo "  -- OpenCode lane (engine lane: provider/model, authentication, and permissions are configured in OpenCode) --"
   if have opencode; then
-    echo "    opencode: $(opencode --version 2>/dev/null | head -1 || echo present) — route: --provider opencode [-m <provider/model>] run \"task\". Cost: $(_lane_cost_disclosure opencode)."
-    echo "      headless run uses the OpenCode plan agent; mutating work is intentionally interactive because OpenCode --auto approves permissions and is documented as dangerous."
+    echo "    opencode: $(opencode --version 2>/dev/null | head -1 || echo present) — route: --provider opencode [-m free|<provider/model>] run|edit|yolo|research \"task\". Default model: opencode/big-pickle (free). Cost: $(_lane_cost_disclosure opencode)."
+    echo "      free aliases: free|opencode/big-pickle (default), free-large (muse-spark, 1M ctx), free-fast (nemotron lightning). Read-only headless uses the plan agent; edit/yolo run under a per-run temp config that auto-allows edits+bash in the workdir (never --auto)."
   else
     echo "    opencode: NOT on PATH — install: https://opencode.ai/docs/ then run 'opencode' once to configure a provider and authenticate"
   fi
