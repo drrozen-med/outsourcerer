@@ -92,20 +92,44 @@ needs no key). Symmetrically `-m fable --provider codex` dies (Claude-backend-on
 
 ## OpenCode lane (`--provider opencode`)
 
-`--provider opencode` delegates through the OpenCode CLI (https://opencode.ai) the user already runs,
-with the provider and model THEY configured. Cash and plan usage depend on that configuration: the
-built-in `opencode/*` provider carries free models whose roster rotates, others bill the user's own
-account. Do NOT hardcode a model or price; check `opencode models --verbose` for the live list.
+`--provider opencode` is a full native lane: `run`, `research`, `edit`, `yolo`, and
+`session start`/`session send` all work. It delegates through the OpenCode CLI
+(https://opencode.ai) the user already runs, with the provider and model THEY configured.
 
-- `-m <provider/model>` passes through **verbatim** (the alias table never rewrites it); `--effort`
-  maps to OpenCode's `--variant`. No `-m` = OpenCode's configured default.
+**Free models (default).** No `-m` selects `opencode/big-pickle` on OpenCode's built-in Zen
+provider — $0 input/output. Lane-local aliases:
+
+| alias | resolves to | note |
+|---|---|---|
+| `free` | `opencode/big-pickle` | default; 200K ctx general model |
+| `free-large` | `opencode/muse-spark-1.3-contributor-free` | 1M ctx |
+| `free-fast` | `opencode/nemotron-3.5-lightning-free` | fast mechanical work |
+
+The free roster is reachable **only through the `opencode` CLI** — the Zen HTTP API rejects
+free models from other clients (`FreeTierError`). `opencode/*` free models report `$0` in cost
+disclosure; other providers/models bill whatever the user's OpenCode account says. The roster
+rotates — check `opencode models --verbose` for the live list. Other `-m <provider/model>` ids
+pass through **verbatim** (the alias table never rewrites them); `--effort` maps to OpenCode's
+`--variant`.
+
 - **Headless `run`/`explore` are read-only:** they use OpenCode's `plan` agent (override with
-  `OSRC_OPENCODE_READ_AGENT`). The write tiers (`edit`/`research`/`yolo`) are REFUSED with a pointer
-  to the supervised path, because headless OpenCode has no reliable read-only-vs-write switch beyond
-  agent choice.
-- **Edits go through a supervised session:** `session start --provider opencode` launches the
-  interactive TUI with the `build` agent (override with `OSRC_OPENCODE_SESSION_AGENT`), so a human or
-  the orchestrator can watch and answer permission prompts.
+  `OSRC_OPENCODE_READ_AGENT`).
+- **Headless `edit`/`research`/`yolo` run under a scoped per-run config:** the lane writes a
+  temporary OpenCode config to a private mktemp dir (never the repo), sets `OPENCODE_CONFIG`
+  for just that run, and deletes it after. The config defines an `osrc-edit` agent
+  (`osrc-yolo` for `yolo`) whose permission block auto-allows `edit`/`write`/`bash`/`webfetch`
+  inside the working directory, denies the `question` tool, and scopes `external_directory`:
+  `deny` for `edit`/`research`, `allow` for `yolo`. Agent-scoped rules evaluate after project
+  config, so a repository `opencode.json` that denies edits cannot silently downgrade the tier.
+  OpenCode's dangerous global `--auto` is never used.
+- **Sessions:** `session start --provider opencode [-m free|<id>]` launches the interactive
+  TUI in tmux with the `build` agent (override: `OSRC_OPENCODE_SESSION_AGENT`) and the resolved
+  model pinned via `--model`; `session send` drives it. `--effort` has no top-level TUI
+  equivalent — the lane warns instead of silently dropping it.
+- **Failure handling:** FreeTierError / "usage limit" / "buy credits" / HTTP 402/429 go through
+  the standard probe-then-decide plan-limit block (a bounded free-model probe verifies before
+  the lane is marked down) and, when the lane is confirmed spent, the job fails over to another
+  ready lane via the normal cross-harness failover. Network drops report as transport failures.
 - Cloud lane: the standard cloud disclosure/ack gate applies (`OSRC_CLOUD_ACK=1` for non-interactive use).
 
 ## Cline lane (`--provider cline`)
