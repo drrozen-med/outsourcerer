@@ -10534,7 +10534,7 @@ _supervise() {
     # write-free), so the new state is never LESS bounded than exploring? was.
     if [ "$mutating" = "1" ] && [ "$idle" -ge "$nww_kill" ] \
        && { [ "$(cat "$jd/status" 2>/dev/null)" = "exploring?" ] || [ "$(cat "$jd/status" 2>/dev/null)" = "no-progress-writes" ]; } \
-       && ! _job_made_writes "$jd" "$_jcwd"; then
+       && ! _job_made_writes "$jd" "$_jcwd" && ! _job_net_alive "$jd" "$pid"; then
       echo wedged > "$jd/status"
       printf 'exploring-timeout\n' > "$jd/reason" 2>/dev/null || true
       echo "[outsourcerer] job $(basename "$jd") stayed in exploring? for ${nww_kill}s with ZERO file writes and no output growth; stopped as stalled. Re-run with a tighter write target if more exploration is genuinely needed." >&2
@@ -14332,7 +14332,12 @@ delegate_opencode() {
     _wait=$(( _wait * _try )); [ "$_wait" -gt 300 ] && _wait=300
     printf '>>> [opencode] transient provider/network failure (rc=%s); resuming session %s in %ss (attempt %s/%s)\n' \
       "$rc" "$_sid" "$_wait" "$_try" "$_max" >&2
-    sleep "$_wait"
+    # Keep the supervisor's silence timers fed while backing off: a quiet multi-minute wait would
+    # otherwise read as a stall / exploring spiral and get the job reaped mid-recovery.
+    while [ "$_wait" -gt 0 ]; do
+      sleep $(( _wait < 30 ? _wait : 30 )); _wait=$(( _wait - 30 ))
+      [ "$_wait" -gt 0 ] && printf '>>> [opencode] backing off before resume (%ss left)\n' "$_wait" >&2
+    done
     rc=0; _t0=$(date +%s)
     _run_tee_stderr "$_lerr" "${ocmd[@]}" --session "$_sid" "${mflag[@]}" ${variant[@]+"${variant[@]}"} \
       "Your previous turn was cut off by a transient provider/network error. Continue the ORIGINAL task from exactly where you left off: check what is already done in the working directory, do not redo finished steps, keep emitting the OSRC::PROGRESS lines, and finish with the OSRC terminal marker exactly as originally instructed." || rc=$?
