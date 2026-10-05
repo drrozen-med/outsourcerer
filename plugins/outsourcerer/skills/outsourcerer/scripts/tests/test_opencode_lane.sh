@@ -79,8 +79,9 @@ MODEL="big-pickle/free" MODEL_EXPLICIT=1 EFFORT="high" TTIER=""
 : > "$OPENCODE_LOG"; : > "$OPENCODE_CFG_LOG"
 delegate_opencode auto >/dev/null 2>&1
 out="$(cat "$OPENCODE_LOG" 2>/dev/null)"
-if printf '%s' "$out" | grep -q 'run --dir ' \
-  && printf '%s' "$out" | grep -q -- '--agent plan' \
+if printf '%s' "$out" | grep -q '^run --agent plan ' \
+  && ! printf '%s' "$out" | grep -q -- '--dir' \
+  && ! printf '%s' "$out" | grep -q -- '--standalone' \
   && printf '%s' "$out" | grep -q -- '--model big-pickle/free' \
   && printf '%s' "$out" | grep -q -- '--variant high' \
   && ! printf '%s' "$out" | grep -q -- '--auto' \
@@ -118,7 +119,8 @@ TMPDIR="$TMP/td" delegate_opencode accept-edits >/dev/null 2>&1
 out="$(cat "$OPENCODE_LOG" 2>/dev/null)"
 cfgpath="$(tail -1 "$OPENCODE_CFG_LOG" 2>/dev/null)"
 if printf '%s' "$out" | grep -q -- '--agent osrc-edit' \
-  && printf '%s' "$out" | grep -q 'run --dir ' \
+  && printf '%s' "$out" | grep -q '^run --standalone ' \
+  && ! printf '%s' "$out" | grep -q -- '--dir' \
   && ! printf '%s' "$out" | grep -q -- '--auto' \
   && case "$cfgpath" in "$TMP/td/"*) true ;; *) false ;; esac \
   && grep -q '"osrc-edit"' "$OPENCODE_CFG_BODY" \
