@@ -20001,6 +20001,12 @@ main() {
   if [ "${OSRC_PREFLIGHT:-0}" = "1" ]; then
     return "$_cmd_rc"
   fi
+  # The delegate INSIDE a supervised bg job (run_job re-enters as `<verb> ...` with OSRC_JOB_DIR set)
+  # is not an orchestrator turn. Running the guard there turned a delegate that had finished with
+  # OSRC::DONE into `failed rc=7` whenever any UNRELATED fleet item needed attention.
+  if [ -n "${OSRC_JOB_DIR:-}" ]; then
+    return "$_cmd_rc"
+  fi
   case "$cmd" in
     __runjob|__heartbeat-beacon|__gencost|__runcost|__so-agree|__escalate-ladder|\
     watch|status|result|logs|cancel|gc|rundown|bearings|heartbeat|fleet|wait|explain|classify|session|\

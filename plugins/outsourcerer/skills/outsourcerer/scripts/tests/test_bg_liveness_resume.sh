@@ -94,4 +94,17 @@ chmod +x "$TMP/bin/lsof"; jd="$(mk net)"
 LSOF_PEER='10.0.0.2:51000->104.18.1.1:443' PATH="$TMP/bin:$PATH" _job_net_alive "$jd" $$ && ok "remote model connection = alive" || bad "remote connection not seen"
 LSOF_PEER='127.0.0.1:51000->127.0.0.1:4096' PATH="$TMP/bin:$PATH" _job_net_alive "$jd" $$ && bad "loopback counted as model connection" || ok "loopback connection ignored"
 
+# 6. the blind-turn guard never runs inside a bg job's delegate (it turned OSRC::DONE into rc 7)
+J6="$TMP/state/jobs/j6"; mkdir -p "$J6"
+cat > "$TMP/bin/opencode" <<'SH'
+#!/usr/bin/env bash
+[ "$1 $2" = "session list" ] && { echo '[]'; exit 0; }
+echo "OSRC::DONE finished" >&2; exit 0
+SH
+chmod +x "$TMP/bin/opencode"
+out="$(cd "$TMP" && PATH="$TMP/bin:$PATH" OSRC_JOB_DIR="$J6" bash -c '
+  OSRC_SOURCED=1 . "$1" >/dev/null 2>&1; _blind_turn_guard() { return 1; }
+  main --provider opencode yolo -m opencode/big-pickle "x" >/dev/null 2>&1; echo "rc=$?"' _ "$SRC")"
+[ "$out" = "rc=0" ] && ok "delegate inside a bg job is not failed by the blind-turn guard" || bad "blind-turn guard leaked into a bg delegate ($out)"
+
 echo "RESULT: $pass passed, $fail failed"; [ "$fail" -eq 0 ]
