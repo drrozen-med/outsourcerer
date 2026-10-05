@@ -828,7 +828,7 @@ _lane_free_probe() {
         [ -n "$out" ] && printf 'opencode CLI not on PATH\n' > "$out"
         printf 'unreachable'; return 0
       fi
-      _timeout "$secs" opencode run --dir "$PWD" --agent "${OSRC_OPENCODE_READ_AGENT:-plan}" \
+      _timeout "$secs" opencode run --agent "${OSRC_OPENCODE_READ_AGENT:-plan}" \
         --model "${OSRC_OPENCODE_PROBE_MODEL:-opencode/nemotron-3.5-lightning-free}" "PONG" \
         </dev/null > "${out:-/dev/null}" 2>&1 || rc=$?
       if [ -n "$out" ] && _lane_plan_limit_refusal opencode "$out"; then printf 'limit-refused'; return 0; fi
@@ -14190,10 +14190,10 @@ delegate_opencode() {
 
   local rc=0 _lerr; _lerr="$(_lane_errfile)"
   if [ -n "$ocfg" ]; then
-    OPENCODE_CONFIG="$ocfg" _run_tee_stderr "$_lerr" opencode run --dir "$PWD" --agent "$oagent" "${mflag[@]}" ${variant[@]+"${variant[@]}"} "$wrapped" || rc=$?
+    OPENCODE_CONFIG="$ocfg" _run_tee_stderr "$_lerr" opencode run --standalone --agent "$oagent" "${mflag[@]}" ${variant[@]+"${variant[@]}"} "$wrapped" || rc=$?
     rm -rf "$(dirname "$ocfg")" 2>/dev/null || true
   else
-    _run_tee_stderr "$_lerr" opencode run --dir "$PWD" --agent "$agent" "${mflag[@]}" ${variant[@]+"${variant[@]}"} "$wrapped" || rc=$?
+    _run_tee_stderr "$_lerr" opencode run --agent "$agent" "${mflag[@]}" ${variant[@]+"${variant[@]}"} "$wrapped" || rc=$?
   fi
   _opencode_after_run "$id" "$rc" "$_lerr"
   [ -n "$_lerr" ] && rm -f "$_lerr" 2>/dev/null
