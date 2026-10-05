@@ -157,7 +157,7 @@ set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 # Version identifier. Single source of truth; bump the rightmost
 # number for patch releases. `doctor` and `--version` both read this.
-OSRC_VERSION="0.13.4"
+OSRC_VERSION="0.13.5"
 DEFAULT_MODEL="${OUTSOURCERER_MODEL:-glm-5.2}"
 
 # ---- platform detection (mac | linux | windows-gitbash). Windows = Git Bash / MSYS2, NO WSL
@@ -3416,6 +3416,33 @@ _opencode_after_run() {
     printf '>>> [opencode] transport failure (rc=%s): network drop or upstream error, not a task failure — the task never got a real answer. Retry the run, or hand it to another lane explicitly (--provider devin|codex|cc|local).\n' "$rc" >&2
   fi
   return 0
+}
+
+# _opencode_transient_failure <capfile> <rc> -> rc0 when the last run died on a retryable upstream
+# hiccup (dropped stream, rate limit, overload, 5xx, timeout) rather than a real refusal or task end.
+# Billing/plan refusals (free tier misuse, credits, usage limit) are NOT transient: they fall through
+# to the plan-limit failover. Only the TAIL is read so task prose mentioning "rate limit" mid-run
+# does not count. A run that printed its signed terminal marker is finished, never resumed.
+_opencode_transient_failure() {
+  local f="${1:-}" rc="${2:-0}" tl el last
+  [ -n "$f" ] && [ -s "$f" ] || return 1
+  tl="$(tail -n "${OSRC_OPENCODE_TAIL:-12}" "$f" 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g')"
+  printf '%s\n' "$tl" | grep -aqE '^[[:space:]]*OSRC::(DONE|BLOCKED|NEED_INPUT)' && return 1
+  el="$(printf '%s\n' "$tl" | grep -aE '^[[:space:]]*Error:' | tail -1)"
+  [ -n "$el" ] || return 1
+  # On a clean exit, only an error that is the run's LAST line counts (it ended the run).
+  last="$(printf '%s\n' "$tl" | grep -av '^[[:space:]]*$' | tail -1)"
+  [ "$rc" -ne 0 ] || [ "$last" = "$el" ] || return 1
+  printf '%s\n' "$el" | grep -aqiE 'free tier can only|FreeTierError|insufficient|credit|usage limit|quota|billing|payment|unauthori|forbidden|invalid api key' && return 1
+  printf '%s\n' "$el" | grep -aqiE 'socket connection was closed|Transport:|ECONNRESET|ETIMEDOUT|EPIPE|network|fetch failed|timed? ?out|rate limit|too many requests|overloaded|temporarily unavailable|internal server error|bad gateway|service unavailable|gateway time|\b50[0-9]\b'
+}
+
+# _opencode_session_by_title <title> [--standalone] -> id of the newest session with that title.
+_opencode_session_by_title() {
+  local t="$1"; shift
+  have jq || return 0
+  opencode session list "$@" --format json -n 30 2>/dev/null \
+    | jq -r --arg t "$t" 'map(select(.title == $t)) | .[0].id // empty' 2>/dev/null
 }
 
 # OpenCode's top-level command starts its interactive TUI. Interactive sessions
@@ -6895,7 +6922,9 @@ _heartbeat_reclaim_dead_pending() { # <canonical>
     pid="${ident%%$'\t'*}"; start="${ident#*$'\t'}"
     _pid_start_valid "$start" || continue
     live="$(_pid_start_identity "$pid" 2>/dev/null)"; rc=$?
-    [ "$rc" -eq 0 ] && [ "$live" != "$start" ] || continue
+    # Dead = pid reused (rc 0, different start) OR pid gone entirely (rc 2: ps works but has no row,
+    # confirmed by kill -0). Requiring rc 0 alone left a pending dir from a crashed claimant forever.
+    { [ "$rc" -eq 0 ] && [ "$live" != "$start" ]; } || { [ "$rc" -eq 2 ] && ! kill -0 "$pid" 2>/dev/null; } || continue
     _heartbeat_remove_tree "$pending" || return 1
   done
 }
@@ -6954,8 +6983,12 @@ _heartbeat_election_acquire() { # <lock> <pid> <pid-start>
     old_start="$(jq -r '.pid_start // empty' "$owner" 2>/dev/null)" || return 1
     _pid_start_valid "$old_start" || return 1
     live="$(_pid_start_identity "$old_pid" 2>/dev/null)"; rc=$?
-    # Only a positive observation of PID reuse/death can recover a lease.
-    if [ "$rc" -eq 0 ] && [ "$live" != "$old_start" ]; then
+    # Only a positive observation of PID reuse/death can recover a lease. rc 2 means ps works and the
+    # pid has no row at all; with kill -0 also failing that IS positive proof of death. Accepting only
+    # rc 0 (reuse) wedged the no-flock (stock macOS) election forever behind a crashed holder, so every
+    # arm printed NOT-ARMED.
+    if { [ "$rc" -eq 0 ] && [ "$live" != "$old_start" ]; } \
+       || { [ "$rc" -eq 2 ] && ! kill -0 "$old_pid" 2>/dev/null; }; then
       rm -f "$owner" 2>/dev/null || return 1
       rmdir "$lock" 2>/dev/null || return 1
       continue
@@ -10224,7 +10257,7 @@ _job_made_writes() {
   [ "${OSRC_FS_PROGRESS:-1}" = "1" ] && [ -n "$jcwd" ] && [ -d "$jcwd" ] || return 1
   [ -f "$jd/.startmark" ] || return 1
   local hit
-  hit="$(find "$jcwd" -maxdepth "${OSRC_FS_PROGRESS_DEPTH:-3}" \
+  hit="$(find "$jcwd" -maxdepth "${OSRC_FS_PROGRESS_DEPTH:-6}" \
            \( -name .git -o -name node_modules -o -name .venv -o -name target -o -name dist \) -prune -o \
            -type f -newer "$jd/.startmark" -print 2>/dev/null | head -1)"
   [ -n "$hit" ]
@@ -10285,6 +10318,21 @@ _delegate_has_model_output() { # <out.log> <progress>
     }
     END { exit(found ? 0 : 1) }
   ' "$log" 2>/dev/null
+}
+
+# _job_net_alive <job-dir> <pid> -> rc0 when the delegate's process group holds an ESTABLISHED TCP
+# connection to a NON-loopback peer, i.e. it is parked on a model/API call. Non-streaming engines
+# (droid exec, devin -p, opencode between tool calls) print nothing for minutes while a completion is
+# in flight, so silence alone is not death. Used ONLY to veto the no-init and stall kills: it never
+# counts as progress, so it cannot stretch the hard cap. No lsof / OSRC_NET_LIVENESS=0 -> rc1 (old behavior).
+_job_net_alive() {
+  local jd="$1" pid="$2" pg="" sel
+  [ "${OSRC_NET_LIVENESS:-1}" = "1" ] || return 1
+  command -v lsof >/dev/null 2>&1 || return 1
+  [ -f "$jd/pgid" ] && pg="$(tr -d '[:space:]' < "$jd/pgid" 2>/dev/null)"
+  case "$pg" in ''|*[!0-9]*) sel=(-p "$pid") ;; *) sel=(-g "$pg") ;; esac
+  lsof -nP -a "${sel[@]}" -iTCP -sTCP:ESTABLISHED -Fn 2>/dev/null \
+    | grep -a '^n.*->' | grep -avE -- '->(127\.|\[::1\]|localhost)' | grep -q .
 }
 
 # _supervise <job-dir> <stall_warn> <stall_kill> <hard_timeout> -- <cmd...>
@@ -10429,7 +10477,13 @@ _supervise() {
     if [ "$initialized" = "0" ] && _delegate_has_model_output "$jd/out.log" "$jd/progress"; then
       initialized=1
     fi
-    if [ "$initialized" = "0" ] && [ "$age" -ge "$noinit" ]; then
+    # A silent-but-working delegate (non-streaming engine that is writing files or waiting on its
+    # model call) is not a hung boot: count a file write as initialization, and let an in-flight
+    # model connection defer (never satisfy) the no-init kill.
+    if [ "$initialized" = "0" ] && [ "$age" -ge "$noinit" ] && _job_made_writes "$jd" "$_jcwd"; then
+      initialized=1
+    fi
+    if [ "$initialized" = "0" ] && [ "$age" -ge "$noinit" ] && ! _job_net_alive "$jd" "$pid"; then
       local _noinit_reason
       _noinit_reason="no-init: delegate never started within ${noinit}s (likely a hung SessionStart hook cold-start or parked lane) — retry, or run as a session to watch it boot"
       echo wedged > "$jd/status"
@@ -10480,7 +10534,7 @@ _supervise() {
     # write-free), so the new state is never LESS bounded than exploring? was.
     if [ "$mutating" = "1" ] && [ "$idle" -ge "$nww_kill" ] \
        && { [ "$(cat "$jd/status" 2>/dev/null)" = "exploring?" ] || [ "$(cat "$jd/status" 2>/dev/null)" = "no-progress-writes" ]; } \
-       && ! _job_made_writes "$jd" "$_jcwd"; then
+       && ! _job_made_writes "$jd" "$_jcwd" && ! _job_net_alive "$jd" "$pid"; then
       echo wedged > "$jd/status"
       printf 'exploring-timeout\n' > "$jd/reason" 2>/dev/null || true
       echo "[outsourcerer] job $(basename "$jd") stayed in exploring? for ${nww_kill}s with ZERO file writes and no output growth; stopped as stalled. Re-run with a tighter write target if more exploration is genuinely needed." >&2
@@ -10533,7 +10587,24 @@ _supervise() {
       fi
     fi
     if [ "$age" -ge "$hard" ]; then
-      echo timeout > "$jd/status"; printf 'hard-timeout:%ss\n' "$hard" > "$jd/reason" 2>/dev/null || true; _kill_job "$jd" "$pid"; echo 124 > "$jd/exit"; return 124
+      # The tier hard cap is a backstop for WEDGED runs, not a budget for productive ones: a 40-minute
+      # coding job that is still emitting output or writing files was being killed at 1800s. Unless the
+      # caller pinned OSRC_TIMEOUT explicitly, extend while there is real progress (output growth or a
+      # cwd write within the stall-warn window) up to OSRC_TIMEOUT_MAX (default 3x the tier cap).
+      local _hmax="${OSRC_TIMEOUT_MAX:-$(( hard * 3 ))}" _hprog=0
+      case "$_hmax" in ''|*[!0-9]*) _hmax=$(( hard * 3 )) ;; esac
+      if [ -z "${OSRC_TIMEOUT:-}" ] && [ "$age" -lt "$_hmax" ]; then
+        if [ "$idle" -lt "$warn" ]; then _hprog=1
+        elif [ -n "${_jcwd:-}" ] && [ -d "$_jcwd" ] && [ -n "$(find "$_jcwd" -maxdepth "${OSRC_FS_PROGRESS_DEPTH:-6}" \
+                \( -name .git -o -name node_modules -o -name .venv -o -name target -o -name dist \) -prune -o \
+                -type f -newer "$jd/.fsmark" -print 2>/dev/null | head -1)" ]; then
+          _hprog=1; last_change=$now; idle=0; : > "$jd/.fsmark"
+        fi
+      fi
+      if [ "$_hprog" = "0" ]; then
+        echo timeout > "$jd/status"; printf 'hard-timeout:%ss\n' "$age" > "$jd/reason" 2>/dev/null || true; _kill_job "$jd" "$pid"; echo 124 > "$jd/exit"; return 124
+      fi
+      [ -f "$jd/.hard_extended" ] || { : > "$jd/.hard_extended"; echo "[outsourcerer] job $(basename "$jd"): past the ${hard}s tier cap but still making progress; extending (absolute cap ${_hmax}s, OSRC_TIMEOUT pins it)." >&2; }
     fi
     # Before declaring a stall, look for progress the LOG cannot show. A delegate that prints nothing
     # while writing files is working, and killing it is the failure this watchdog causes rather than
@@ -10559,7 +10630,7 @@ _supervise() {
       # `-newer <file>` is POSIX; `-newermt @epoch` is a GNU extension that BSD find silently fails to
       # parse, which would make this check quietly never fire on macOS. Compare against a marker file
       # we re-stamp on every confirmed sign of life instead.
-      _newest="$(find "$_jcwd" -maxdepth "${OSRC_FS_PROGRESS_DEPTH:-3}" \
+      _newest="$(find "$_jcwd" -maxdepth "${OSRC_FS_PROGRESS_DEPTH:-6}" \
                    \( -name .git -o -name node_modules -o -name .venv -o -name target -o -name dist \) -prune -o \
                    -type f -newer "$jd/.fsmark" -print 2>/dev/null | head -1)"
       if [ -n "$_newest" ]; then
@@ -10581,7 +10652,11 @@ _supervise() {
         [ "$(cat "$jd/status" 2>/dev/null)" = "stalled?" ] && echo running > "$jd/status"
       fi
     fi
-    if [ "$idle" -ge "$kill_after" ]; then
+    # Silent but parked on a live model connection: not a stall. Veto the kill (status stays a
+    # visible stalled?), and let the hard cap remain the backstop for a connection that never returns.
+    if [ "$idle" -ge "$kill_after" ] && _job_net_alive "$jd" "$pid"; then
+      [ -f "$jd/.net_veto" ] || { : > "$jd/.net_veto"; echo "[outsourcerer] job $(basename "$jd"): silent ${idle}s but its process group holds a live model connection; not killing (hard cap ${hard}s still applies)." >&2; }
+    elif [ "$idle" -ge "$kill_after" ]; then
       # A job that never emitted ANYTHING past the launch banner is a different failure from one that
       # produced work and then went quiet, and it has a different fix. The usual cause is a prompt that
       # told the delegate to stay silent (write to a file, print only at the end) — advice this tool
@@ -10670,6 +10745,25 @@ _supervise() {
     echo "[outsourcerer] WARN: delegate exited 0 without OSRC::DONE, verify before trusting" >&2
     return 2
   fi
+}
+
+# _spawn_detached <cmd...> -- start the bg SUPERVISOR in its own session (or at least its own process
+# group), stdio to /dev/null, and return at once. A bare `nohup cmd &` leaves the supervisor in the
+# CALLER's process group: when the caller's tool call ends or times out (agent Bash tools kill the whole
+# group, ~120s by default), the supervisor gets SIGTERM, its trap kills the healthy delegate, and the job
+# is recorded `interrupted:signal` 1-2 minutes into a 30-minute task. nohup only ignores SIGHUP.
+# macOS ships no setsid(1), so fall back to perl's POSIX::setsid (stock on macOS), then to `set -m`
+# (new process group). The extra subshell makes the supervisor an orphan of launchd/init right away.
+_spawn_detached() {
+  if [ "${OSRC_BG_NO_DETACH:-0}" = "1" ]; then nohup "$@" </dev/null >/dev/null 2>&1 & return 0; fi
+  if command -v setsid >/dev/null 2>&1; then
+    ( setsid nohup "$@" </dev/null >/dev/null 2>&1 & )
+  elif command -v perl >/dev/null 2>&1; then
+    ( nohup perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or exit 127' "$@" </dev/null >/dev/null 2>&1 & )
+  else
+    ( set -m; nohup "$@" </dev/null >/dev/null 2>&1 & )
+  fi
+  return 0
 }
 
 _new_job_id() { printf '%s-%s' "$(date +%Y%m%d-%H%M%S)" "$(od -An -N6 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n' || printf '%06x%06x' $$ ${RANDOM:-0})"; }
@@ -10853,7 +10947,7 @@ _bg_launch() {
   if ! echo launching > "$jd/status" 2>/dev/null; then
     rm -rf "$jd" 2>/dev/null; echo "bg: cannot write job status under $jd (filesystem full/unwritable?)" >&2; return 1
   fi
-  OSRC_PROVIDER_EXPLICIT="${PROVIDER_EXPLICIT:-0}" nohup "$SCRIPT_PATH" __runjob "$id" "$PROVIDER" "$@" >/dev/null 2>&1 &
+  OSRC_PROVIDER_EXPLICIT="${PROVIDER_EXPLICIT:-0}" _spawn_detached "$SCRIPT_PATH" __runjob "$id" "$PROVIDER" "$@"
   # Verified supervision arm (SPEC heartbeat-liveness A+B): nothing claims "armed" over a dead
   # watcher. Everything here goes to STDERR ONLY -- this function runs inside `id=$(_bg_launch ...)`
   # and its stdout is the job-id contract. rc 0 = leader verified live; rc 1 = loud NOT-ARMED
@@ -11593,6 +11687,21 @@ _reconcile_status() {
   printf '%s' "$st"
 }
 
+# _job_pgroup_live_count <job-dir> -> number of live (non-zombie) processes still in the delegate's
+# recorded process group that started AFTER the job did (so a recycled pgid never counts).
+_job_pgroup_live_count() {
+  local jd="$1" pg sa now n=0 p g st et
+  pg="$(tr -d '[:space:]' < "$jd/pgid" 2>/dev/null)"; case "$pg" in ''|*[!0-9]*) printf '0'; return ;; esac
+  sa="$(cat "$jd/started_at" 2>/dev/null)"; case "$sa" in ''|*[!0-9]*) printf '0'; return ;; esac
+  now="$(date +%s)"
+  while read -r p g st et; do
+    [ "$g" = "$pg" ] || continue
+    case "$st" in Z*) continue ;; esac
+    [ "$(_devin_elapsed_secs "$et")" -le $(( now - sa + 5 )) ] && n=$((n + 1))
+  done < <(ps -axo pid=,pgid=,stat=,etime= 2>/dev/null)
+  printf '%s' "$n"
+}
+
 _status_line() {
   local id="$1" jd="$OSRC_JOBS/$1" st model started now age prog acts verb flag="" _w
   [ -d "$jd" ] || { echo "no such job: $1" >&2; return 1; }
@@ -11642,6 +11751,13 @@ _status_line() {
   if [ "$(cat "$jd/supervision" 2>/dev/null)" = "not-armed" ] && ! _heartbeat_leader_alive; then
     flag="$flag !SUPERVISION:NOT-ARMED"
   fi
+  # A terminal verdict over a delegate that is still running is a lie the operator acts on (merges
+  # half-done work, launches a duplicate). Say so whenever the job's process group outlived its verdict.
+  case "$st" in
+    done|done\?|failed|blocked|timeout|wedged|canceled|interrupted|permission-blocked)
+      local _np; _np="$(_job_pgroup_live_count "$jd")"
+      [ "${_np:-0}" -gt 0 ] 2>/dev/null && flag="$flag !STILL-ALIVE:${_np}procs(pgid $(cat "$jd/pgid" 2>/dev/null))" ;;
+  esac
   prog="$(printf '%s' "$prog" | cut -c1-"${OSRC_PROG_WIDTH:-64}")"
   printf '%-22s %-8s %-6s %-16s %-12s %s\n' "$id" "$st" "$agetxt" "$model" "${acts:-—}$flag" "$prog"
 }
@@ -11809,7 +11925,7 @@ _classify_job() {
       # Bounded FS scan: files newer than .startmark but NOT newer than $jd/exit. This excludes
       # any write after the job terminated (orchestrator commits, editor autosaves, a rerun).
       local _hit
-      _hit="$(find "$jcwd" -maxdepth "${OSRC_FS_PROGRESS_DEPTH:-3}" \
+      _hit="$(find "$jcwd" -maxdepth "${OSRC_FS_PROGRESS_DEPTH:-6}" \
                \( -name .git -o -name node_modules -o -name .venv -o -name target -o -name dist \) -prune -o \
                -type f -newer "$jd/.startmark" ! -newer "$jd/exit" -print 2>/dev/null | head -1)"
       if [ -n "$_hit" ]; then
@@ -14189,12 +14305,44 @@ delegate_opencode() {
   _tier_banner "opencode" "$id" "$ttier" "$posture | $(_opencode_cost_note "$id")"
 
   local rc=0 _lerr; _lerr="$(_lane_errfile)"
-  if [ -n "$ocfg" ]; then
-    OPENCODE_CONFIG="$ocfg" _run_tee_stderr "$_lerr" opencode run --standalone --agent "$oagent" "${mflag[@]}" ${variant[@]+"${variant[@]}"} "$wrapped" || rc=$?
-    rm -rf "$(dirname "$ocfg")" 2>/dev/null || true
-  else
-    _run_tee_stderr "$_lerr" opencode run --agent "$agent" "${mflag[@]}" ${variant[@]+"${variant[@]}"} "$wrapped" || rc=$?
-  fi
+  # TRANSIENT-FAILURE RESUME. Free Zen models drop mid-run ("Transport: The socket connection was
+  # closed unexpectedly", "Rate limit exceeded") and `opencode run` then exits 1, ending a 30-minute
+  # job 2-10 minutes in with the work half done. Tag the session with a unique --title, and on a
+  # transient error resume THAT session (--session <id>; never `-c`, which grabs whatever session is
+  # newest in this directory) with backoff, up to OSRC_OPENCODE_RESUMES times (default 6, 0 = off).
+  # A custom --session id cannot be pre-assigned: the free tier rejects client-minted session ids.
+  local -a ocmd=(opencode run --agent "$agent")
+  [ -n "$ocfg" ] && ocmd=(env OPENCODE_CONFIG="$ocfg" opencode run --standalone --agent "$oagent")
+  local _title="osrc-${OSRC_RUN_ID:-$$}-$RANDOM" _sid="" _try=0 _max="${OSRC_OPENCODE_RESUMES:-6}" _wait
+  case "$_max" in ''|*[!0-9]*) _max=6 ;; esac
+  local _t0; _t0=$(date +%s)
+  _run_tee_stderr "$_lerr" "${ocmd[@]}" --title "$_title" "${mflag[@]}" ${variant[@]+"${variant[@]}"} "$wrapped" || rc=$?
+  while [ "$_try" -lt "$_max" ] && _opencode_transient_failure "$_lerr" "$rc"; do
+    # The budget bounds CONSECUTIVE failures: a segment that ran for minutes did real work, so a long
+    # job that hits several unrelated drops over 40 minutes is not cut off by the count.
+    [ $(( $(date +%s) - _t0 )) -ge "${OSRC_OPENCODE_RESUME_RESET:-300}" ] && _try=0
+    _try=$((_try + 1))
+    [ -n "$_sid" ] || _sid="$(_opencode_session_by_title "$_title" ${ocfg:+--standalone})"
+    # No session to resume -> stop. Re-sending the full task fresh would be a blind retry of a
+    # mutating run with no memory of what it already changed.
+    [ -n "$_sid" ] || { printf '>>> [opencode] transient failure but session %s not found; not retrying blind.\n' "$_title" >&2; break; }
+    # Rate limits on the shared free tier need a real cool-down; plain drops can resume quickly.
+    _wait=${OSRC_OPENCODE_RESUME_WAIT:-20}
+    tail -n 12 "$_lerr" 2>/dev/null | grep -aqiE 'rate limit|too many requests' && _wait=${OSRC_OPENCODE_RATELIMIT_WAIT:-60}
+    _wait=$(( _wait * _try )); [ "$_wait" -gt 300 ] && _wait=300
+    printf '>>> [opencode] transient provider/network failure (rc=%s); resuming session %s in %ss (attempt %s/%s)\n' \
+      "$rc" "$_sid" "$_wait" "$_try" "$_max" >&2
+    # Keep the supervisor's silence timers fed while backing off: a quiet multi-minute wait would
+    # otherwise read as a stall / exploring spiral and get the job reaped mid-recovery.
+    while [ "$_wait" -gt 0 ]; do
+      sleep $(( _wait < 30 ? _wait : 30 )); _wait=$(( _wait - 30 ))
+      [ "$_wait" -gt 0 ] && printf '>>> [opencode] backing off before resume (%ss left)\n' "$_wait" >&2
+    done
+    rc=0; _t0=$(date +%s)
+    _run_tee_stderr "$_lerr" "${ocmd[@]}" --session "$_sid" "${mflag[@]}" ${variant[@]+"${variant[@]}"} \
+      "Your previous turn was cut off by a transient provider/network error. Continue the ORIGINAL task from exactly where you left off: check what is already done in the working directory, do not redo finished steps, keep emitting the OSRC::PROGRESS lines, and finish with the OSRC terminal marker exactly as originally instructed." || rc=$?
+  done
+  [ -n "$ocfg" ] && { rm -rf "$(dirname "$ocfg")" 2>/dev/null || true; }
   _opencode_after_run "$id" "$rc" "$_lerr"
   [ -n "$_lerr" ] && rm -f "$_lerr" 2>/dev/null
   record_ledger opencode "$id" "$ttier" "$tier" "$task" "" "opencode"
@@ -19851,6 +19999,12 @@ main() {
   # bg/fanout launch with "route preflight returned non-zero" — the tool refusing to start the very
   # work that would clear the backlog. Preflight returns its own dispatch rc untouched.
   if [ "${OSRC_PREFLIGHT:-0}" = "1" ]; then
+    return "$_cmd_rc"
+  fi
+  # The delegate INSIDE a supervised bg job (run_job re-enters as `<verb> ...` with OSRC_JOB_DIR set)
+  # is not an orchestrator turn. Running the guard there turned a delegate that had finished with
+  # OSRC::DONE into `failed rc=7` whenever any UNRELATED fleet item needed attention.
+  if [ -n "${OSRC_JOB_DIR:-}" ]; then
     return "$_cmd_rc"
   fi
   case "$cmd" in

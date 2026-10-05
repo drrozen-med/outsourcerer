@@ -2,6 +2,18 @@
 
 All notable changes to the Outsourcerer plugin are documented here.
 
+## 0.13.5
+
+### Fixed
+
+- **Long `bg` jobs no longer die with their caller.** The bg supervisor was launched with a bare `nohup … &`, so it stayed in the caller's process group; when an agent's tool call ended or timed out (~120 s), the group kill TERMed the supervisor and its trap killed a healthy delegate (`interrupted:signal` 1–2 minutes into a 30-minute task). The supervisor now starts in its own session (`setsid`, else perl `POSIX::setsid` on macOS, else `set -m`).
+- **OpenCode lane resumes after transient upstream failures.** "Transport: The socket connection was closed unexpectedly" and "Rate limit exceeded" made `opencode run` exit 1 and ended the job. Each run is tagged with a unique `--title`; on a transient error the same session is resumed with `--session <id>` and backoff (`OSRC_OPENCODE_RESUMES`, default 6 consecutive; the budget resets after a long productive segment). Billing/free-tier refusals and runs that printed their terminal marker are never resumed, and nothing is ever re-sent blind.
+- **Silent-but-alive workers are not reaped.** The no-init kill now counts a cwd file write as initialization, and both the no-init and the stall kill are vetoed while the delegate's process group holds an ESTABLISHED non-loopback TCP connection (a model call in flight; `droid exec`, `devin -p`). This only vetoes kills; it never extends the hard cap.
+- **The tier hard cap no longer kills productive jobs.** Past the cap a job keeps running while it is still producing output or writing files, up to `OSRC_TIMEOUT_MAX` (default 3× the tier cap). An explicit `OSRC_TIMEOUT` stays strict.
+- **Status reports live processes behind a terminal verdict** (`!STILL-ALIVE:<n>procs`), and file-write detection looks 6 levels deep (was 3), so monorepo writes clear `exploring?`.
+- **A finished bg job is no longer reported `failed rc=7`.** The delegate inside a bg job re-enters the script as `<verb> …`, so the orchestrator's blind-turn guard ran there and returned 7 whenever any unrelated fleet item needed attention, overriding a delegate that had printed `OSRC::DONE`.
+- **Supervision arms on macOS again.** On the no-flock (mkdir) election path, a holder whose pid no longer exists (ps rc 2) was never reclaimed, so one crashed claimant wedged every later arm as `NOT-ARMED` permanently.
+
 ## 0.13.4
 
 ### Added
