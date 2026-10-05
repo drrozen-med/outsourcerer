@@ -11,6 +11,7 @@ All notable changes to the Outsourcerer plugin are documented here.
 - **Silent-but-alive workers are not reaped.** The no-init kill now counts a cwd file write as initialization, and both the no-init and the stall kill are vetoed while the delegate's process group holds an ESTABLISHED non-loopback TCP connection (a model call in flight; `droid exec`, `devin -p`). This only vetoes kills; it never extends the hard cap.
 - **The tier hard cap no longer kills productive jobs.** Past the cap a job keeps running while it is still producing output or writing files, up to `OSRC_TIMEOUT_MAX` (default 3× the tier cap). An explicit `OSRC_TIMEOUT` stays strict.
 - **Status reports live processes behind a terminal verdict** (`!STILL-ALIVE:<n>procs`), and file-write detection looks 6 levels deep (was 3), so monorepo writes clear `exploring?`.
+- **A finished bg job is no longer reported `failed rc=7`.** The delegate inside a bg job re-enters the script as `<verb> …`, so the orchestrator's blind-turn guard ran there and returned 7 whenever any unrelated fleet item needed attention, overriding a delegate that had printed `OSRC::DONE`.
 - **Supervision arms on macOS again.** On the no-flock (mkdir) election path, a holder whose pid no longer exists (ps rc 2) was never reclaimed, so one crashed claimant wedged every later arm as `NOT-ARMED` permanently.
 
 ## 0.13.4
